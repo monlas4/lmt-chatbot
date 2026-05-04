@@ -1,4 +1,3 @@
-```html
 <!doctype html>
 <html lang="en">
   <head>
@@ -208,7 +207,7 @@
 
       .empty-state {
         margin: auto;
-        max-width: 520px;
+        max-width: 540px;
         text-align: center;
         color: var(--muted);
         padding: 40px 20px 18px;
@@ -221,6 +220,13 @@
         margin-bottom: 6px;
       }
 
+      .empty-state code,
+      .note code {
+        background: var(--chat);
+        border-radius: 6px;
+        padding: 2px 5px;
+      }
+
       .message {
         display: grid;
         gap: 8px;
@@ -231,7 +237,8 @@
       }
 
       .message.assistant,
-      .message.error {
+      .message.error,
+      .message.system {
         justify-items: start;
       }
 
@@ -265,6 +272,12 @@
       .assistant.brain .bubble {
         background: linear-gradient(180deg, #fffefa 0%, #fbfcf8 100%);
         border-color: #d9e4d7;
+      }
+
+      .system .bubble {
+        background: var(--accent-soft);
+        border-color: #d9e4d7;
+        color: var(--accent);
       }
 
       .error .bubble {
@@ -502,10 +515,9 @@
         font-size: 0.82rem;
       }
 
-      .note code {
-        background: var(--chat);
-        border-radius: 6px;
-        padding: 2px 5px;
+      .memory-status {
+        color: var(--muted-2);
+        font-size: 0.74rem;
       }
 
       .hidden {
@@ -601,7 +613,9 @@
             <div class="empty-state" id="empty-state">
               <strong>Your notes will appear here.</strong>
               Use <code>/chat</code> for normal conversation, <code>/brain</code>
-              to return, or <code>/clear</code> to reset.
+              to return, <code>/remember ...</code> to save memory,
+              <code>/memory</code> to view memory, <code>/forget</code> to clear memory,
+              or <code>/clear</code> to reset chat.
             </div>
           </main>
 
@@ -617,7 +631,7 @@
               <button class="send" id="send" type="submit">Send</button>
             </form>
             <div class="command-hint">
-              Commands: /brain switches to structured notes · /chat switches to normal assistant · /clear resets the conversation
+              Commands: /brain · /chat · /clear · /remember I prefer concise answers · /memory · /forget
             </div>
           </div>
         </section>
@@ -642,12 +656,25 @@
             </div>
 
             <div class="field">
+              <label for="memory">User memory</label>
+              <textarea
+                id="memory"
+                spellcheck="false"
+                placeholder="- User prefers concise answers&#10;- User works on..."
+              ></textarea>
+              <div class="memory-status" id="memory-status">
+                Saved locally in this browser.
+              </div>
+            </div>
+
+            <div class="field">
               <label for="chat-system">Chat Mode system prompt</label>
               <textarea id="chat-system" spellcheck="false"></textarea>
             </div>
 
             <div class="panel-actions">
               <button class="ghost" id="reset-prompts" type="button">Reset prompts</button>
+              <button class="ghost danger" id="clear-memory" type="button">Clear memory</button>
               <button class="ghost danger" id="reset-all" type="button">Reset all</button>
             </div>
           </section>
@@ -660,6 +687,11 @@
             </p>
             <p class="note">
               <strong>Chat Mode</strong> behaves like a normal assistant.
+            </p>
+            <p class="note">
+              <strong>Memory</strong> is stored locally in your browser and included
+              in future prompts. Use <code>/remember</code>, <code>/memory</code>,
+              or <code>/forget</code>.
             </p>
             <p class="note">
               Your API key is stored only in this browser session and sent directly
@@ -684,6 +716,10 @@
         chatSystem: "second-brain-chat-system",
       };
 
+      const LOCAL_STORAGE = {
+        memory: "second-brain-user-memory",
+      };
+
       const state = {
         mode: sessionStorage.getItem(STORAGE.mode) || "brain",
         messages: [],
@@ -702,8 +738,11 @@
         side: document.getElementById("side"),
         key: document.getElementById("key"),
         model: document.getElementById("model"),
+        memory: document.getElementById("memory"),
+        memoryStatus: document.getElementById("memory-status"),
         chatSystem: document.getElementById("chat-system"),
         resetPrompts: document.getElementById("reset-prompts"),
+        clearMemory: document.getElementById("clear-memory"),
         resetAll: document.getElementById("reset-all"),
         chat: document.getElementById("chat"),
         empty: document.getElementById("empty-state"),
@@ -717,15 +756,22 @@
       function init() {
         els.key.value = sessionStorage.getItem(STORAGE.apiKey) || "";
         els.model.value = sessionStorage.getItem(STORAGE.model) || "gpt-4o-mini";
+        els.memory.value = localStorage.getItem(LOCAL_STORAGE.memory) || "";
         els.chatSystem.value =
           sessionStorage.getItem(STORAGE.chatSystem) || DEFAULT_CHAT_SYSTEM;
 
-        els.key.addEventListener("input", () => saveOrClear(STORAGE.apiKey, els.key.value));
+        els.key.addEventListener("input", () => saveOrClearSession(STORAGE.apiKey, els.key.value));
         els.model.addEventListener("change", () => sessionStorage.setItem(STORAGE.model, els.model.value));
-        els.chatSystem.addEventListener("input", () => saveOrClear(STORAGE.chatSystem, els.chatSystem.value));
+        els.chatSystem.addEventListener("input", () => saveOrClearSession(STORAGE.chatSystem, els.chatSystem.value));
+
+        els.memory.addEventListener("input", () => {
+          saveMemory(els.memory.value);
+          flashMemoryStatus("Memory saved locally.");
+        });
 
         els.brainMode.addEventListener("click", () => setMode("brain", true));
         els.chatMode.addEventListener("click", () => setMode("chat", true));
+
         els.settingsToggle.addEventListener("click", () => {
           els.side.classList.toggle("collapsed");
         });
@@ -735,16 +781,31 @@
           sessionStorage.setItem(STORAGE.chatSystem, DEFAULT_CHAT_SYSTEM);
         });
 
+        els.clearMemory.addEventListener("click", () => {
+          if (!confirm("Clear user memory?")) return;
+          clearMemory();
+          addMessage({
+            role: "system",
+            content: "Memory cleared.",
+          });
+        });
+
         els.resetAll.addEventListener("click", () => {
-          if (!confirm("Reset API key, settings, mode, and conversation?")) return;
+          if (!confirm("Reset API key, settings, memory, mode, and conversation?")) return;
           Object.values(STORAGE).forEach((key) => sessionStorage.removeItem(key));
+          localStorage.removeItem(LOCAL_STORAGE.memory);
+
           state.mode = "brain";
           state.messages = [];
+
           els.key.value = "";
           els.model.value = "gpt-4o-mini";
+          els.memory.value = "";
           els.chatSystem.value = DEFAULT_CHAT_SYSTEM;
+
           setMode("brain", false);
           renderConversation();
+          flashMemoryStatus("Memory cleared.");
         });
 
         els.composer.addEventListener("submit", onSubmit);
@@ -818,7 +879,7 @@
             role: "assistant",
             mode: "brain",
             content:
-              "## Summary\nSecond Brain mode is now active.\n\n## Key Points\n- I will turn input into structured notes.\n- Responses will use the Second Brain format.\n\n## Organized Notes\nUse this mode for thoughts, meetings, research, plans, and decision logs.\n\n## Next Steps\n- Paste anything you want organized.",
+              "## Summary\nSecond Brain mode is now active.\n\n## Key Points\n- I will turn input into structured notes.\n- Responses will use the Second Brain format.\n- I will use saved user memory when relevant.\n\n## Organized Notes\nUse this mode for thoughts, meetings, research, plans, and decision logs.\n\n## Next Steps\n- Paste anything you want organized.",
           });
           return true;
         }
@@ -828,13 +889,51 @@
           addMessage({
             role: "assistant",
             mode: "chat",
-            content: "Chat Mode is now active. Ask me anything normally.",
+            content: "Chat Mode is now active. I will use saved memory when it helps.",
           });
           return true;
         }
 
         if (command === "/clear") {
           clearConversation();
+          return true;
+        }
+
+        if (command === "/memory") {
+          const memory = getMemory();
+          addMessage({
+            role: "system",
+            content: memory
+              ? `Saved memory:\n\n${memory}`
+              : "No user memory saved yet. Use `/remember ...` or edit the Memory field in Settings.",
+          });
+          return true;
+        }
+
+        if (command === "/forget") {
+          clearMemory();
+          addMessage({
+            role: "system",
+            content: "Memory cleared.",
+          });
+          return true;
+        }
+
+        if (command.startsWith("/remember ")) {
+          const fact = text.slice("/remember ".length).trim();
+          if (!fact) {
+            addMessage({
+              role: "error",
+              content: "Write something after /remember, for example: /remember I prefer concise answers.",
+            });
+            return true;
+          }
+
+          rememberFact(fact);
+          addMessage({
+            role: "system",
+            content: `Remembered: ${fact}`,
+          });
           return true;
         }
 
@@ -869,6 +968,42 @@
       function clearConversation() {
         state.messages = [];
         renderConversation();
+      }
+
+      function getMemory() {
+        return localStorage.getItem(LOCAL_STORAGE.memory)?.trim() || "";
+      }
+
+      function saveMemory(value) {
+        const cleanValue = value.trim();
+        if (cleanValue) localStorage.setItem(LOCAL_STORAGE.memory, cleanValue);
+        else localStorage.removeItem(LOCAL_STORAGE.memory);
+      }
+
+      function rememberFact(fact) {
+        const currentMemory = getMemory();
+        const normalizedFact = fact.replace(/^[-*]\s*/, "").trim();
+        const nextMemory = currentMemory
+          ? `${currentMemory}\n- ${normalizedFact}`
+          : `- ${normalizedFact}`;
+
+        saveMemory(nextMemory);
+        els.memory.value = nextMemory;
+        flashMemoryStatus("Memory saved locally.");
+      }
+
+      function clearMemory() {
+        localStorage.removeItem(LOCAL_STORAGE.memory);
+        els.memory.value = "";
+        flashMemoryStatus("Memory cleared.");
+      }
+
+      function flashMemoryStatus(text) {
+        els.memoryStatus.textContent = text;
+        window.clearTimeout(flashMemoryStatus.timeout);
+        flashMemoryStatus.timeout = window.setTimeout(() => {
+          els.memoryStatus.textContent = "Saved locally in this browser.";
+        }, 1600);
       }
 
       function addMessage(message) {
@@ -935,6 +1070,7 @@
       function getMessageLabel(message) {
         if (message.role === "user") return "You";
         if (message.role === "error") return "Error";
+        if (message.role === "system") return "System";
         return message.mode === "brain" ? "Second Brain" : "Assistant";
       }
 
@@ -1009,11 +1145,23 @@
           .replace(/"/g, "&quot;");
       }
 
-      async function callOpenAI(userText) {
-        const mode = state.mode;
-        const systemPrompt =
-          mode === "brain" ? SECOND_BRAIN_SYSTEM : els.chatSystem.value;
+      function buildSystemPrompt() {
+        const basePrompt =
+          state.mode === "brain" ? SECOND_BRAIN_SYSTEM : els.chatSystem.value;
 
+        const memory = getMemory();
+
+        if (!memory) return basePrompt;
+
+        return `${basePrompt}
+
+Saved user memory:
+${memory}
+
+Use this memory when it is relevant. Do not mention that you are using memory unless the user asks. If the memory conflicts with the user's latest message, follow the latest message.`;
+      }
+
+      async function callOpenAI(userText) {
         const recentMessages = state.messages
           .filter((message) => message.role === "user" || message.role === "assistant")
           .filter((message) => !message.loading)
@@ -1026,10 +1174,10 @@
         const payload = {
           model: els.model.value,
           messages: [
-            { role: "system", content: systemPrompt },
+            { role: "system", content: buildSystemPrompt() },
             ...recentMessages,
           ],
-          temperature: mode === "brain" ? 0.3 : 0.7,
+          temperature: state.mode === "brain" ? 0.3 : 0.7,
         };
 
         if (els.model.value.startsWith("gpt-3.5")) {
@@ -1056,11 +1204,10 @@
         return data.choices?.[0]?.message?.content?.trim() || "";
       }
 
-      function saveOrClear(key, value) {
+      function saveOrClearSession(key, value) {
         if (value) sessionStorage.setItem(key, value);
         else sessionStorage.removeItem(key);
       }
     </script>
   </body>
 </html>
-```
